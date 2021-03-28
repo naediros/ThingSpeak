@@ -9,15 +9,22 @@ class Database:
 
         self.connection = sqlite3.connect("data.db")
         self.verbose = verbose
-        self.TS_READ_KEY = os.environ["READ_KEY"]
-        self.TS_CHANNEL_ID = os.environ["CHANNEL_ID"]
+        self.GREENHOUSE_TS_READ_KEY = os.environ["GREENHOUSE_READ_KEY"]
+        self.GREENHOUSE_TS_CHANNEL_ID = os.environ["GREENHOUSE_CHANNEL_ID"]
+
+        self.DOOM_TS_READ_KEY = os.environ["DOOM_READ_KEY"]
+        self.DOOM_TS_CHANNEL_ID = os.environ["DOOM_CHANNEL_ID"]
+
+    def __del__(self):
+        self.connection.close()
 
     def __str__(self):
         return "SQLite database interface for greenhouse weather station"
 
-    def create_src_data_table(self):
+    def create_src_data_tables(self):
         query = f"""CREATE TABLE IF NOT EXISTS greenhouse_src_data (
                         time_stamp REAL PRIMARY KEY,
+                        time_stamp_unix INTEGER,
                         entry_id INTEGER,
                         temp_inside REAL,
                         temp_outside REAL,
@@ -30,28 +37,52 @@ class Database:
                         battery_power REAL
                         );
                         """
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+
+        query = f"""CREATE TABLE IF NOT EXISTS doom_src_data (
+                        time_stamp REAL PRIMARY KEY,
+                        time_stamp_unix INTEGER,
+                        entry_id INTEGER,
+                        temp_livingroom REAL,
+                        temp_heater_inlet REAL,
+                        temp_heater_outlet REAL,
+                        well_emergency_discharge REAL
+                        );
+                        """
 
         cursor = self.connection.cursor()
         cursor.execute(query)
 
-    def get_ts_data(self, record_count=8000):
+
+    def convert_time_stamp(self, time_stamp:str):
+        """Return UNIX epoch timestamp"""
+        import time
+
+        time_stamp = time_stamp[:-4]
+        ts = time.strptime(time_stamp, '%Y-%m-%d  %H:%M:%S')
+        time_stamp = time.mktime(ts)
+        return int(time_stamp)
+
+    def get_ts_data(self, channel_id, read_api_key, record_count=8000):
         import requests
 
         r = requests.get(
-            f'https://api.thingspeak.com/channels/{self.TS_CHANNEL_ID}/feeds.csv?api_key={self.TS_READ_KEY}&results={record_count}')
+            f'https://api.thingspeak.com/channels/{channel_id}/feeds.csv?api_key={read_api_key}&results={record_count}')
         result = r.text.split("\n")
         result = [tuple(i.split(",")) for i in result if i]
         result = result[1:]
 
         if self.verbose:
-            print(f"{len(result)} records retrieved from ThingSpeak server")
+            print(f"{len(result)} records retrieved from ThingSpeak server for channel ID {channel_id}")
 
         return result
 
-    def add_db_entry(self, record: tuple, verbose=False):
+    def add_db_entry_greenhouse(self, record: tuple, verbose=False):
         """"Record tuple format (timestamp, entry_id, temp_in, temp_out, humidity_in, dew_point_in,
             batt_volt, batt_curr, air_pressure, light_intensity"""
-        timestamp = record[0]
+        time_stamp = record[0]
+        time_stamp_unix = self.convert_time_stamp(time_stamp)
         entry_id = int(record[1])
         temp_in = float(record[2])
         temp_out = float(record[3])
@@ -64,7 +95,7 @@ class Database:
         light_intensity = int(record[9])
 
         query = f"""INSERT OR REPLACE INTO greenhouse_src_data 
-                   VALUES ("{timestamp}", {entry_id}, {temp_in}, {temp_out}, {humidity_in}, {dew_point_in}, 
+                   VALUES ("{time_stamp}", {time_stamp_unix}, {entry_id}, {temp_in}, {temp_out}, {humidity_in}, {dew_point_in}, 
                             {voltage}, {current}, {air_pressure}, {light_intensity}, {power})
                     ;"""
 
@@ -72,7 +103,7 @@ class Database:
         cursor.execute(query)
 
         if verbose:
-            print(f"""Entry number: {entry_id} recorded on: {timestamp}
+            print(f"""Entry number: {entry_id} recorded on: {time_stamp}
                       Inside: 
                               Temperature: {temp_in} deg.C
                               Humidity:     {humidity_in} %
@@ -88,16 +119,71 @@ class Database:
                               Current: {current} mA
                               Power:   {power:.0f} mW """)
 
-    def retrieve_latest_entries_from_ts(self, **kwargs):
+    def add_db_entry_doom(self, record: tuple, verbose=False):
+        """"Record tuple format (timestamp, entry_id, temp_livingroom, temp_heater_inlet, temp_heater_outlet, well_discharge"""
+
+        time_stamp = record[0]
+        time_stamp_unix = self.convert_time_stamp(time_stamp)
+        entry_id = int(record[1])
+
+        try:
+            temp_living_room = float(record[2])
+        except ValueError:
+            temp_living_room = "NULL"
+
+        try:
+            temp_heater_inlet = float(record[3])
+        except ValueError:
+            temp_heater_inlet = "NULL"
+
+        try:
+            temp_heater_outlet = float(record[4])
+        except ValueError:
+            temp_heater_outlet = "NULL"
+
+        try:
+            well_discharge = float(record[5])
+        except ValueError:
+            well_discharge = "NULL"
+
+        query = f"""INSERT OR REPLACE INTO doom_src_data 
+                   VALUES ("{time_stamp}", {time_stamp_unix}, {entry_id}, {temp_living_room}, {temp_heater_inlet}, {temp_heater_outlet}, {well_discharge})
+                    ;"""
+
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+
+        if verbose:
+            print(f"""Entry number: {entry_id} recorded on: {time_stamp}
+                      Living room: 
+                              Temperature: {temp_living_room} deg.C
+                              
+                      Heater:
+                              Inlet temperature:     {temp_heater_inlet} deg.C
+                              Outlet temperature:    {temp_heater_outlet} deg. C
+
+                      Well discharged volume: {well_discharge} l
+                    """)
+
+    def retrieve_latest_entries_from_ts(self):
         """Retrieve latest records from ThingSpeak channel and update records in local DB"""
-        result = self.get_ts_data(**kwargs)
+        result = self.get_ts_data(channel_id=self.GREENHOUSE_TS_CHANNEL_ID, read_api_key=self.GREENHOUSE_TS_READ_KEY)
         for i in result:
-            self.add_db_entry(i)
+            self.add_db_entry_greenhouse(i)
+        self.connection.commit()
 
         if self.verbose:
-            print(f"{len(result)} records updated in local DB.")
+            print(f"{len(result)} greenhouse weather station records received.")
 
-    def get_all_data(self):
+        result = self.get_ts_data(channel_id=self.DOOM_TS_CHANNEL_ID, read_api_key=self.DOOM_TS_READ_KEY)
+        for i in result:
+            self.add_db_entry_doom(i)
+        self.connection.commit()
+
+        if self.verbose:
+            print(f"{len(result)} home sensors records received.")
+
+    def get_all_data_greenhouse(self):
         """Return all stored data as Pandas DataFrame"""
         import pandas as pd
 

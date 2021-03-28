@@ -1,12 +1,11 @@
 import database
 
 def test():
-    import pandas as pd
+
 
     db = database.Database(verbose=True)
-    df = db.get_all_data()
+    db.create_src_data_tables()
+    db.retrieve_latest_entries_from_ts()
 
-    with pd.option_context('display.max_rows', None, 'display.max_columns', None):
-        print(df.describe())
 
 test()

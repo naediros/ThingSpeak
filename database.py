@@ -1,13 +1,21 @@
 class Database:
 
     def __init__(self, verbose=False):
-        import sqlite3
+        import pymysql
         import dotenv
         import os
 
         dotenv.load_dotenv()
 
-        self.connection = sqlite3.connect("data.db")
+        try:
+            self.connection = pymysql.connect(user=os.environ["DB_USER"],
+                                              password=os.environ["DB_PASSWORD"],
+                                              host=os.environ["DB_HOST_IP"],
+                                              port=3307,
+                                              database=os.environ["DB_NAME"])
+        except pymysql.Error as e:
+            print(f"Error connecting to MariaDB Platform: {e}")
+
         self.verbose = verbose
         self.GREENHOUSE_TS_READ_KEY = os.environ["GREENHOUSE_READ_KEY"]
         self.GREENHOUSE_TS_CHANNEL_ID = os.environ["GREENHOUSE_CHANNEL_ID"]
@@ -19,11 +27,10 @@ class Database:
         self.connection.close()
 
     def __str__(self):
-        return "SQLite database interface for greenhouse weather station"
+        return "MariaDB database interface for greenhouse weather station"
 
     def create_src_data_tables(self):
         query = f"""CREATE TABLE IF NOT EXISTS greenhouse_src_data (
-                        time_stamp REAL PRIMARY KEY,
                         time_stamp_unix INTEGER,
                         entry_id INTEGER,
                         temp_inside REAL,
@@ -41,8 +48,7 @@ class Database:
         cursor.execute(query)
 
         query = f"""CREATE TABLE IF NOT EXISTS doom_src_data (
-                        time_stamp REAL PRIMARY KEY,
-                        time_stamp_unix INTEGER,
+                        time_stamp_unix,
                         entry_id INTEGER,
                         temp_livingroom REAL,
                         temp_heater_inlet REAL,
@@ -54,14 +60,14 @@ class Database:
         cursor = self.connection.cursor()
         cursor.execute(query)
 
-
-    def convert_time_stamp(self, time_stamp:str):
+    def convert_time_stamp(self, time_stamp: str):
         """Return UNIX epoch timestamp"""
         import time
+        import calendar
 
-        time_stamp = time_stamp[:-4]
-        ts = time.strptime(time_stamp, '%Y-%m-%d  %H:%M:%S')
-        time_stamp = time.mktime(ts)
+        time_stamp = time_stamp[:-4] + " +00:00"
+        ts = time.strptime(time_stamp, '%Y-%m-%d  %H:%M:%S %z')
+        time_stamp = calendar.timegm(ts)
         return int(time_stamp)
 
     def get_ts_data(self, channel_id, read_api_key, record_count=8000):
@@ -94,8 +100,8 @@ class Database:
         air_pressure = int(record[8])
         light_intensity = int(record[9])
 
-        query = f"""INSERT OR REPLACE INTO greenhouse_src_data 
-                   VALUES ("{time_stamp}", {time_stamp_unix}, {entry_id}, {temp_in}, {temp_out}, {humidity_in}, {dew_point_in}, 
+        query = f"""REPLACE INTO greenhouse_src_data 
+                   VALUES ({time_stamp_unix}, {entry_id}, {temp_in}, {temp_out}, {humidity_in}, {dew_point_in}, 
                             {voltage}, {current}, {air_pressure}, {light_intensity}, {power})
                     ;"""
 
@@ -103,7 +109,7 @@ class Database:
         cursor.execute(query)
 
         if verbose:
-            print(f"""Entry number: {entry_id} recorded on: {time_stamp}
+            print(f"""Entry number: {entry_id} 
                       Inside: 
                               Temperature: {temp_in} deg.C
                               Humidity:     {humidity_in} %
@@ -146,18 +152,18 @@ class Database:
         except ValueError:
             well_discharge = "NULL"
 
-        query = f"""INSERT OR REPLACE INTO doom_src_data 
-                   VALUES ("{time_stamp}", {time_stamp_unix}, {entry_id}, {temp_living_room}, {temp_heater_inlet}, {temp_heater_outlet}, {well_discharge})
+        query = f"""REPLACE INTO doom_src_data 
+                   VALUES ({time_stamp_unix}, {entry_id}, {temp_living_room}, {temp_heater_inlet}, {temp_heater_outlet}, {well_discharge})
                     ;"""
 
         cursor = self.connection.cursor()
         cursor.execute(query)
 
         if verbose:
-            print(f"""Entry number: {entry_id} recorded on: {time_stamp}
+            print(f"""Entry number: {entry_id} 
                       Living room: 
                               Temperature: {temp_living_room} deg.C
-                              
+
                       Heater:
                               Inlet temperature:     {temp_heater_inlet} deg.C
                               Outlet temperature:    {temp_heater_outlet} deg. C
@@ -182,26 +188,3 @@ class Database:
 
         if self.verbose:
             print(f"{len(result)} home sensors records received.")
-
-    def get_all_data_greenhouse(self):
-        """Return all stored data as Pandas DataFrame"""
-        import pandas as pd
-
-        query = f"""SELECT time_stamp, temp_inside, temp_outside, humidity_inside, dew_point_inside, air_pressure, 
-                            light_intensity, battery_voltage, battery_current, battery_power
-                    FROM greenhouse_src_data
-                    ORDER by time_stamp
-                    ;"""
-
-        cursor = self.connection.cursor()
-        cursor.execute(query)
-        result = cursor.fetchall()
-
-        df = pd.DataFrame(result)
-        df.index = df[0]
-        df.drop([0, ], axis=1, inplace=True)
-
-        df.columns = ["Temperature in [°C]", "Temperature out [°C]", "Humidity in [%]", "Dew point in [°C]",
-                      "Air pressure [hPa]", "Light intensity [lux]",
-                      "Battery voltage [V]", "Battery current [mA]", "Battery power [mW]"]
-        return df
